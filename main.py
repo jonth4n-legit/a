@@ -38,8 +38,8 @@ USER_DATA_DIR2 = "C:/Users/hp_5c/selenium-profile/Default/Extensions"
 COOKIES_FILE = "cookies.json"
 GCLOUD_COMMAND = "gcloud auth log-access-token"
 
-# Buster Extension Path
-BUSTER_EXTENSION_PATH = r"C:\Users\hp_5c\selenium-profile\Default\Extensions\mpbjkejclgfgadiemmefgebjfooflfhl\3.1"
+# Buster Extension Path - Updated to use relative path
+BUSTER_EXTENSION_PATH = os.path.join(os.getcwd(), "Extensions", "mpbjkejclgfgadiemmefgebjfooflfhl", "3.1.0_0")
 
 # Firefox Relay API token (dari tes.py)
 RELAY_API_TOKEN = "30eabdbb-b923-4f08-ae45-d5bf7eee562e"
@@ -150,7 +150,7 @@ def get_hwid():
 
 
 def detect_and_solve_captcha():
-    """Detect and auto-solve reCAPTCHA using Buster extension"""
+    """Detect and auto-solve reCAPTCHA using Buster extension with enhanced auto-clicking"""
     try:
         log_text_message("🔍 Checking for reCAPTCHA...")
         
@@ -188,22 +188,97 @@ def detect_and_solve_captcha():
                 "iframe[src*='recaptcha/api2/bframe']")
             
             if challenge_frame and challenge_frame[0].is_displayed():
-                log_text_message("🎯 Challenge detected, using Buster to solve...")
+                log_text_message("🎯 Challenge detected, attempting to auto-click Buster extension...")
                 
                 # Switch to challenge iframe
                 driver.switch_to.frame(challenge_frame[0])
                 
-                # Wait for and click the Buster button
-                buster_button = WebDriverWait(driver, 10).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, 
-                        "button#solver-button, button.rc-button.help-button-holder"))
-                )
-                buster_button.click()
-                log_text_message("✅ Clicked Buster solver button")
+                # Try multiple methods to click Buster extension icon
+                buster_clicked = False
+                
+                # Method 1: Try to find and click Buster solver button inside challenge frame
+                try:
+                    buster_button = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, 
+                            "button#solver-button"))
+                    )
+                    buster_button.click()
+                    log_text_message("✅ Clicked Buster solver button (Method 1)")
+                    buster_clicked = True
+                except:
+                    pass
+                
+                # Method 2: Try to click help button that might have Buster attached
+                if not buster_clicked:
+                    try:
+                        help_button = driver.find_element(By.CSS_SELECTOR, "button.rc-button.help-button-holder")
+                        if help_button:
+                            help_button.click()
+                            time.sleep(1)
+                            # Look for Buster in shadow DOM
+                            shadow_buster = driver.execute_script("""
+                                var helpBtn = document.querySelector('button.rc-button.help-button-holder');
+                                if (helpBtn && helpBtn.shadowRoot) {
+                                    var busterBtn = helpBtn.shadowRoot.querySelector('#solver-button');
+                                    if (busterBtn) {
+                                        busterBtn.click();
+                                        return true;
+                                    }
+                                }
+                                return false;
+                            """)
+                            if shadow_buster:
+                                log_text_message("✅ Clicked Buster solver button (Method 2 - Shadow DOM)")
+                                buster_clicked = True
+                    except:
+                        pass
+                
+                # Method 3: Try to trigger Buster via extension messaging
+                if not buster_clicked:
+                    try:
+                        # Try to trigger Buster extension directly
+                        driver.execute_script("""
+                            // Try to trigger Buster extension
+                            if (window.chrome && window.chrome.runtime) {
+                                try {
+                                    // Dispatch custom event that Buster might listen for
+                                    window.dispatchEvent(new CustomEvent('buster-solve-captcha'));
+                                    
+                                    // Try to call Buster function if available
+                                    if (window.buster && typeof window.buster.solve === 'function') {
+                                        window.buster.solve();
+                                    }
+                                    
+                                    // Try common Buster patterns
+                                    if (window.Buster && typeof window.Buster.solve === 'function') {
+                                        window.Buster.solve();
+                                    }
+                                } catch (e) {
+                                    console.log('Buster trigger attempt failed:', e);
+                                }
+                            }
+                        """)
+                        log_text_message("✅ Attempted to trigger Buster via extension API (Method 3)")
+                        buster_clicked = True
+                        time.sleep(2)  # Give Buster time to work
+                    except:
+                        pass
+                
+                # Method 4: Fallback - look for any audio challenge and try to solve manually
+                if not buster_clicked:
+                    try:
+                        # Try to click audio challenge button as fallback
+                        audio_btn = driver.find_element(By.ID, "recaptcha-audio-button")
+                        if audio_btn:
+                            audio_btn.click()
+                            log_text_message("🔊 Clicked audio challenge as fallback")
+                            time.sleep(2)
+                    except:
+                        pass
                 
                 driver.switch_to.default_content()
                 
-                # Wait for Buster to solve
+                # Wait for Buster to solve or manual intervention
                 time.sleep(5)  # Give Buster time to work
                 
                 # Check if solved
@@ -211,8 +286,17 @@ def detect_and_solve_captcha():
                     log_text_message("✅ Captcha solved successfully!")
                     return True
                 else:
-                    log_text_message("⚠️ Buster might need manual help...")
-                    return False
+                    log_text_message("⚠️ Buster auto-solve incomplete, may need manual intervention")
+                    # Don't return False immediately, let the user try manual solve
+                    log_text_message(">>> Silakan selesaikan captcha <<<")
+                    log_text_message("➡️  Selesaikan reCAPTCHA di browser. Script lanjut otomatis setelah verified…")
+                    
+                    # Wait longer for manual solve
+                    if wait_for_captcha_solved(timeout=60):
+                        log_text_message("✅ Captcha solved manually!")
+                        return True
+                    else:
+                        return False
             else:
                 # No challenge, we're good
                 log_text_message("✅ No challenge required!")
@@ -1120,23 +1204,37 @@ def start_lab():
     def random_string(length=8):
         return ''.join(random.choices(string.ascii_lowercase, k=length))
     
+    # Create unique user data directory to avoid conflicts
+    unique_suffix = random_string(6)
+    unique_user_data_dir = f"{USER_DATA_DIR}_{unique_suffix}"
+    
     try:
         log_text_message("🔁 Memulai proses lab...")
         
-        # Initialize driver with extensions and same profile as login
+        # Clean up any existing user data directory conflicts
+        try:
+            if os.path.exists(unique_user_data_dir):
+                shutil.rmtree(unique_user_data_dir, ignore_errors=True)
+                time.sleep(1)
+        except:
+            pass
+        
+        # Initialize driver with extensions and unique profile
         options = Options()
-        options.add_argument(f"--user-data-dir={USER_DATA_DIR}")
+        options.add_argument(f"--user-data-dir={unique_user_data_dir}")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-gpu")
         options.add_argument("--ignore-certificate-errors")
         options.add_argument("--start-maximized")
-        options.add_argument("--remote-debugging-port=9222")
+        options.add_argument("--remote-debugging-port=0")  # Use random port
         options.add_argument("--disable-software-rasterizer")
         options.add_argument("--disable-blink-features=AutomationControlled")
         options.add_argument("--disable-web-security")
         options.add_argument("--allow-running-insecure-content")
         options.add_argument("--disable-features=VizDisplayCompositor")
+        options.add_argument("--disable-extensions-file-access-check")
+        options.add_argument("--disable-extensions-http-throttling")
         options.add_experimental_option("excludeSwitches", ["enable-automation"])
         options.add_experimental_option('useAutomationExtension', False)
         
@@ -1392,33 +1490,22 @@ def start_lab():
             log_text_message("Gagal membuat/mengambil API Key setelah 3 percobaan.")
             return
             
-        # Update API key to server
+        # Save API key to local file instead of server upload
         try:
-            device_id = get_hwid()
-            update_url = "https://veo.w.workers.dev/api/update-api-key"
+            # Save to api.txt file (append mode to keep previous keys)
+            with open("api.txt", "a", encoding="utf-8") as f:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                f.write(f"[{timestamp}] API Key: {api_key}\n")
+                f.write(f"[{timestamp}] Username: {username}\n")
+                f.write(f"[{timestamp}] Password: {password_lab}\n")
+                f.write(f"[{timestamp}] Project ID: {project_id}\n")
+                f.write(f"[{timestamp}] SSO URL: {open_console_url}\n")
+                f.write("-" * 80 + "\n")
             
-            payload = {
-                "device_id": device_id,
-                "new_api_key": api_key
-            }
-            
-            headers = {
-                "Content-Type": "application/json"
-            }
-            
-            response = requests.post(update_url, json=payload, headers=headers)
-            
-            if response.status_code == 200:
-                log_text_message("✅ API key berhasil di-update ke server.")
-            elif response.status_code == 404:
-                log_text_message("Device ID tidak ditemukan di server.")
-            elif response.status_code == 409:
-                log_text_message("API key sudah dipakai oleh device lain.")
-            else:
-                log_text_message(f"Respon tidak dikenal dari server: {response.status_code}")
+            log_text_message("✅ API key berhasil disimpan ke api.txt")
                 
         except Exception as e:
-            log_text_message(f"Gagal kirim ke endpoint update: {e}")
+            log_text_message(f"❌ Gagal menyimpan ke api.txt: {e}")
             
         # Display results
         log_text_message(f"{'=' * 60}")
@@ -1455,6 +1542,15 @@ def start_lab():
                 driver = None
         except:
             pass
+        
+        # Clean up unique user data directory
+        try:
+            if 'unique_user_data_dir' in locals() and os.path.exists(unique_user_data_dir):
+                time.sleep(2)  # Wait a bit before cleanup
+                shutil.rmtree(unique_user_data_dir, ignore_errors=True)
+                log_text_message(f"🧹 Cleaned up temporary profile: {unique_user_data_dir}")
+        except Exception as e:
+            log_text_message(f"⚠️ Could not clean up temp profile: {e}")
 
 
 def loop_start_lab():
