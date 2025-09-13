@@ -9,6 +9,7 @@ import string
 import shutil
 import requests
 import pyperclip
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -70,6 +71,38 @@ gui_root = None
 log_text = None
 model_dropdown = None
 polling_delay_entry = None
+
+
+def cleanup_chrome_processes():
+    """Clean up any hanging Chrome processes"""
+    try:
+        import subprocess
+        import platform
+        
+        if platform.system() == "Windows":
+            # Windows
+            try:
+                subprocess.run(["taskkill", "/f", "/im", "chrome.exe"], 
+                             capture_output=True, timeout=10)
+                subprocess.run(["taskkill", "/f", "/im", "chromedriver.exe"], 
+                             capture_output=True, timeout=10)
+                log_text_message("🧹 Windows Chrome processes cleaned up")
+            except:
+                pass
+        else:
+            # Linux/Mac
+            try:
+                subprocess.run(["pkill", "-f", "chrome"], 
+                             capture_output=True, timeout=10)
+                subprocess.run(["pkill", "-f", "chromedriver"], 
+                             capture_output=True, timeout=10)
+                log_text_message("🧹 Linux Chrome processes cleaned up")
+            except:
+                pass
+        
+        time.sleep(2)  # Wait for processes to fully terminate
+    except Exception as e:
+        log_text_message(f"⚠️ Chrome cleanup warning: {e}")
 
 
 def random_string(length=8):
@@ -1334,9 +1367,14 @@ def create_chrome_driver(use_existing_profile=True, max_retries=3):
             # Clean up any conflicts with the selected directory
             try:
                 if not use_existing_profile and os.path.exists(user_data_dir):
+                    log_text_message(f"🧹 Cleaning up existing profile: {user_data_dir}")
                     shutil.rmtree(user_data_dir, ignore_errors=True)
-                    time.sleep(1)
-            except:
+                    time.sleep(2)  # Wait for filesystem cleanup
+                
+                # Ensure directory exists
+                os.makedirs(user_data_dir, exist_ok=True)
+            except Exception as cleanup_error:
+                log_text_message(f"⚠️ Profile cleanup warning: {cleanup_error}")
                 pass
             
             options.add_argument(f"--user-data-dir={user_data_dir}")
@@ -1375,8 +1413,29 @@ def create_chrome_driver(use_existing_profile=True, max_retries=3):
             else:
                 options.add_argument("--remote-debugging-port=0")  # Use random port
             
-            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            # Additional options to handle common Chrome issues
+            options.add_argument("--disable-logging")
+            options.add_argument("--disable-gpu-logging") 
+            options.add_argument("--disable-gpu-sandbox")
+            options.add_argument("--disable-software-rasterizer")
+            options.add_argument("--no-first-run")
+            options.add_argument("--no-default-browser-check")
+            options.add_argument("--disable-default-apps")
+            options.add_argument("--disable-popup-blocking")
+            options.add_argument("--disable-translate")
+            options.add_argument("--disable-background-timer-throttling")
+            options.add_argument("--disable-renderer-backgrounding")
+            options.add_argument("--disable-backgrounding-occluded-windows")
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            
+            # Handle the specific GPU and DevTools issues from the logs
+            options.add_argument("--disable-gl-drawing-for-tests")
+            options.add_argument("--disable-ipc-flooding-protection")
+            options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
             options.add_experimental_option('useAutomationExtension', False)
+            
+            # Set user agent to avoid detection
+            options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             
             # Load Buster extension
             if os.path.exists(BUSTER_EXTENSION_PATH):
@@ -1396,12 +1455,7 @@ def create_chrome_driver(use_existing_profile=True, max_retries=3):
             try:
                 # Kill any existing Chrome processes that might interfere
                 if retry > 0:
-                    try:
-                        import subprocess
-                        subprocess.run(["pkill", "-f", "chrome"], capture_output=True, timeout=5)
-                        time.sleep(2)
-                    except:
-                        pass
+                    cleanup_chrome_processes()
                 
                 service = Service(ChromeDriverManager().install())
                 service.start()  # Start service first
@@ -1464,7 +1518,7 @@ def start_lab():
         log_text_message("🔁 Memulai proses lab...")
         
         # Try to create driver using existing profile first
-        driver, user_data_dir = create_chrome_driver(use_existing_profile=True)
+        driver, user_data_dir = create_chrome_driver(use_existing_profile=True, max_retries=5)  # Increase retries
         
         # PENTING: Hapus semua masks Firefox Relay yang ada
         log_text_message("🧹 Membersihkan masks Firefox Relay yang ada...")
@@ -1571,7 +1625,42 @@ def start_lab():
                 log_text_message(f"Error extracting email via regex: {e}")
         
         if not new_email:
-            raise Exception("Gagal mengekstrak email baru dari Firefox Relay")
+            # Fallback: get any text that looks like an email 
+            try:
+                page_text = driver.page_source
+                import re
+                email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+                emails = re.findall(email_pattern, page_text)
+                if emails:
+                    # Filter for mozmail.com emails (Firefox Relay)
+                    mozmail_emails = [email for email in emails if 'mozmail.com' in email.lower()]
+                    if mozmail_emails:
+                        # Get the most recent one (usually the last in the list)
+                        new_email = mozmail_emails[-1]
+                        log_text_message(f"📧 Email ditemukan via regex: {new_email}")
+                    elif emails:
+                        # Fallback to any email found
+                        new_email = emails[-1]
+                        log_text_message(f"📧 Email fallback ditemukan: {new_email}")
+            except Exception as e:
+                log_text_message(f"Error extracting email via regex: {e}")
+        
+        # Final fallback: manually check common mask locations
+        if not new_email:
+            try:
+                # Look for any element containing an @ symbol
+                at_elements = driver.find_elements(By.XPATH, "//*[contains(text(), '@')]")
+                for element in at_elements:
+                    text = element.text.strip()
+                    if '@' in text and '.' in text and len(text) < 100:  # Basic email validation
+                        new_email = text
+                        log_text_message(f"📧 Email ditemukan via @ search: {new_email}")
+                        break
+            except Exception as e:
+                log_text_message(f"Error in @ symbol search: {e}")
+        
+        if not new_email:
+            raise Exception("Gagal mengekstrak email baru dari Firefox Relay - semua metode gagal")
         
         # Open signup page
         if not open_signup_page():
@@ -2021,10 +2110,91 @@ def setup_gui():
     gui_root.mainloop()
 
 
+def run_lab_cli():
+    """Run lab process via command line interface"""
+    print("🚀 Starting Cloud Skills Boost Lab Automation (CLI Mode)")
+    print("=" * 60)
+    
+    # Test core functions first
+    if not test_functions():
+        print("❌ Core function tests failed, exiting")
+        return
+    
+    print("\n📋 This script automates:")
+    print("1. Firefox Relay email generation")
+    print("2. Cloud Skills Boost account creation") 
+    print("3. Lab startup and API key extraction")
+    
+    print("\n⚠️  Prerequisites:")
+    print("- Chrome browser installed")
+    print("- Firefox Relay account logged in")
+    print("- Stable internet connection")
+    
+    response = input("\n▶️  Continue? (y/N): ").strip().lower()
+    if response != 'y':
+        print("Exiting...")
+        return
+    
+    try:
+        # You could call start_lab() here for full automation
+        print("\n🔧 Lab automation would start here...")
+        print("💡 Use GUI mode for full functionality")
+        
+    except KeyboardInterrupt:
+        print("\n⚠️ Process interrupted by user")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+
+
+def test_functions():
+    """Test critical functions without browser dependencies"""
+    print("🧪 Testing core functions...")
+    
+    # Test random_string function
+    try:
+        test_string = random_string()
+        assert len(test_string) == 8
+        test_string_10 = random_string(10)
+        assert len(test_string_10) == 10
+        print(f"✅ random_string test passed: '{test_string}', '{test_string_10}'")
+    except Exception as e:
+        print(f"❌ random_string test failed: {e}")
+        return False
+    
+    # Test RelayManager initialization
+    try:
+        relay_manager = RelayManager()
+        assert relay_manager.api_token is not None
+        print("✅ RelayManager initialization test passed")
+    except Exception as e:
+        print(f"❌ RelayManager test failed: {e}")
+        return False
+    
+    # Test log_text_message function
+    try:
+        log_text_message("Test message")
+        print("✅ log_text_message test passed")
+    except Exception as e:
+        print(f"❌ log_text_message test failed: {e}")
+        return False
+        
+    print("✅ All core function tests passed!")
+    return True
+
+
 # Main execution
 if __name__ == "__main__":
-    if GUI_AVAILABLE:
+    # Test core functions first
+    if "--test" in sys.argv:
+        test_functions()
+    elif "--cli" in sys.argv:
+        run_lab_cli()
+    elif GUI_AVAILABLE:
         setup_gui()
     else:
         log_text_message("Running in headless mode - GUI not available")
+        print("Available options:")
+        print("  --test  : Run core function tests")
+        print("  --cli   : Run CLI interface")
+        print("  --help  : Show this help")
         # Could add CLI interface here if needed
