@@ -9,6 +9,7 @@ import string
 import shutil
 import requests
 import pyperclip
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -26,9 +27,25 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
 
 # GUI imports
-import tkinter
-from tkinter import simpledialog
-import customtkinter
+try:
+    import tkinter
+    from tkinter import simpledialog
+    import customtkinter
+    GUI_AVAILABLE = True
+except ImportError:
+    GUI_AVAILABLE = False
+    # Create dummy classes for headless environment
+    class DummyDialog:
+        @staticmethod
+        def askstring(title, prompt, show=None):
+            return input(f"{title} - {prompt}: ")
+    
+    class DummyTkinter:
+        StringVar = str
+    
+    tkinter = DummyTkinter()
+    simpledialog = DummyDialog()
+    customtkinter = None
 
 # Constants
 LAB_URL = "https://www.cloudskillsboost.google/course_templates/976/labs/550875"
@@ -54,6 +71,45 @@ gui_root = None
 log_text = None
 model_dropdown = None
 polling_delay_entry = None
+
+
+def cleanup_chrome_processes():
+    """Clean up any hanging Chrome processes"""
+    try:
+        import subprocess
+        import platform
+        
+        if platform.system() == "Windows":
+            # Windows
+            try:
+                subprocess.run(["taskkill", "/f", "/im", "chrome.exe"], 
+                             capture_output=True, timeout=10)
+                subprocess.run(["taskkill", "/f", "/im", "chromedriver.exe"], 
+                             capture_output=True, timeout=10)
+                log_text_message("🧹 Windows Chrome processes cleaned up")
+            except:
+                pass
+        else:
+            # Linux/Mac
+            try:
+                subprocess.run(["pkill", "-f", "chrome"], 
+                             capture_output=True, timeout=10)
+                subprocess.run(["pkill", "-f", "chromedriver"], 
+                             capture_output=True, timeout=10)
+                log_text_message("🧹 Linux Chrome processes cleaned up")
+            except:
+                pass
+        
+        time.sleep(2)  # Wait for processes to fully terminate
+    except Exception as e:
+        log_text_message(f"⚠️ Chrome cleanup warning: {e}")
+
+
+def random_string(length=8):
+    """Generate a random string of specified length"""
+    import random
+    import string
+    return ''.join(random.choices(string.ascii_lowercase, k=length))
 
 
 class RelayManager:
@@ -1207,47 +1263,69 @@ def check_firefox_relay_login(driver, max_retries=3):
             driver.get("https://relay.firefox.com/accounts/profile/")
             time.sleep(5)
             
-            # Method 1: Look for Generate new mask button
-            try:
-                WebDriverWait(driver, 8).until(
-                    EC.presence_of_element_located((By.XPATH, "//button[contains(text(), 'Generate new mask')]"))
-                )
-                log_text_message("✅ Firefox Relay terdeteksi sudah login (Generate button found)")
-                return True
-            except TimeoutException:
-                pass
+            # Method 1: Look for Generate new mask button (multiple variations)
+            generate_button_selectors = [
+                "//button[contains(text(), 'Generate new mask')]",
+                "//button[contains(text(), 'Generate')]", 
+                "//button[contains(@data-testid, 'generate')]",
+                "//button[contains(@class, 'generate')]",
+                "//*[contains(text(), 'Generate') and (name()='button' or name()='a')]"
+            ]
+            
+            for selector in generate_button_selectors:
+                try:
+                    WebDriverWait(driver, 5).until(
+                        EC.presence_of_element_located((By.XPATH, selector))
+                    )
+                    log_text_message("✅ Firefox Relay terdeteksi sudah login (Generate button found)")
+                    return True
+                except TimeoutException:
+                    continue
             
             # Method 2: Check for profile elements or dashboard
-            try:
-                profile_elements = [
-                    "//div[contains(@class, 'profile')]",
-                    "//div[contains(@class, 'dashboard')]", 
-                    "//button[contains(@class, 'generate')]",
-                    "//div[contains(@class, 'alias')]"
-                ]
-                
-                for element_xpath in profile_elements:
-                    try:
-                        WebDriverWait(driver, 3).until(
-                            EC.presence_of_element_located((By.XPATH, element_xpath))
-                        )
-                        log_text_message("✅ Firefox Relay terdeteksi sudah login (profile element found)")
-                        return True
-                    except TimeoutException:
-                        continue
-            except Exception:
-                pass
+            profile_selectors = [
+                "//div[contains(@class, 'profile')]",
+                "//div[contains(@class, 'dashboard')]", 
+                "//button[contains(@class, 'generate')]",
+                "//div[contains(@class, 'alias')]",
+                "//div[contains(@class, 'mask')]",
+                "//*[contains(@data-testid, 'mask')]"
+            ]
+            
+            for selector in profile_selectors:
+                try:
+                    WebDriverWait(driver, 3).until(
+                        EC.presence_of_element_located((By.XPATH, selector))
+                    )
+                    log_text_message("✅ Firefox Relay terdeteksi sudah login (profile element found)")
+                    return True
+                except TimeoutException:
+                    continue
             
             # Method 3: Check current URL for redirect patterns
             current_url = driver.current_url.lower()
-            if "profile" in current_url or "dashboard" in current_url:
-                log_text_message("✅ Firefox Relay terdeteksi sudah login (URL indicates logged in)")
-                return True
+            if any(keyword in current_url for keyword in ["profile", "dashboard", "relay.firefox.com/accounts"]):
+                # Additional check: make sure we're not on login page
+                if "sign" not in current_url and "login" not in current_url:
+                    log_text_message("✅ Firefox Relay terdeteksi sudah login (URL indicates logged in)")
+                    return True
             
             # Method 4: Check if we're redirected to login page
-            if "accounts.firefox.com" in current_url or "login" in current_url:
+            if any(keyword in current_url for keyword in ["accounts.firefox.com", "login", "sign"]):
                 log_text_message("❌ Firefox Relay belum login (redirected to login page)")
                 return False
+            
+            # Method 5: Check page content for login indicators
+            try:
+                page_source = driver.page_source.lower()
+                if any(keyword in page_source for keyword in ["generate mask", "email alias", "relay dashboard"]):
+                    log_text_message("✅ Firefox Relay terdeteksi sudah login (page content indicates logged in)")
+                    return True
+                elif any(keyword in page_source for keyword in ["sign in", "log in", "enter your email"]):
+                    log_text_message("❌ Firefox Relay belum login (page content indicates login required)")
+                    return False
+            except Exception:
+                pass
             
             # If none of the above worked, try refreshing and retrying
             if retry < max_retries - 1:
@@ -1271,7 +1349,6 @@ def check_firefox_relay_login(driver, max_retries=3):
 
 def create_chrome_driver(use_existing_profile=True, max_retries=3):
     """Create Chrome driver with proper error handling and session reuse"""
-    import random  # Import random module for fallback profiles
     
     for retry in range(max_retries):
         try:
@@ -1283,8 +1360,6 @@ def create_chrome_driver(use_existing_profile=True, max_retries=3):
                 log_text_message(f"🔄 Menggunakan profil yang sudah ada: {user_data_dir}")
             else:
                 # Fallback to unique profile only if existing profile fails or doesn't exist
-                def random_string(length=8):
-                    return ''.join(random.choices(string.ascii_lowercase, k=length))
                 unique_suffix = random_string(6)
                 user_data_dir = f"{USER_DATA_DIR}_{unique_suffix}"
                 log_text_message(f"🆕 Membuat profil baru: {user_data_dir}")
@@ -1292,43 +1367,75 @@ def create_chrome_driver(use_existing_profile=True, max_retries=3):
             # Clean up any conflicts with the selected directory
             try:
                 if not use_existing_profile and os.path.exists(user_data_dir):
+                    log_text_message(f"🧹 Cleaning up existing profile: {user_data_dir}")
                     shutil.rmtree(user_data_dir, ignore_errors=True)
-                    time.sleep(1)
-            except:
+                    time.sleep(2)  # Wait for filesystem cleanup
+                
+                # Ensure directory exists
+                os.makedirs(user_data_dir, exist_ok=True)
+            except Exception as cleanup_error:
+                log_text_message(f"⚠️ Profile cleanup warning: {cleanup_error}")
                 pass
             
             options.add_argument(f"--user-data-dir={user_data_dir}")
-            options.add_argument("--disable-dev-shm-usage")
+            
+            # Try to avoid port conflicts and improve stability
             options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage") 
             options.add_argument("--disable-gpu")
             options.add_argument("--ignore-certificate-errors")
             options.add_argument("--start-maximized")
-            
-            # Try to avoid port conflicts
-            if retry > 0:
-                # Use different port strategy on retry
-                import random
-                debug_port = random.randint(9222, 9999)
-                options.add_argument(f"--remote-debugging-port={debug_port}")
-                log_text_message(f"🔄 Retry {retry}: Menggunakan debug port {debug_port}")
-            else:
-                options.add_argument("--remote-debugging-port=0")  # Use random port
-            
-            options.add_argument("--disable-software-rasterizer")
-            options.add_argument("--disable-blink-features=AutomationControlled")
             options.add_argument("--disable-web-security")
             options.add_argument("--allow-running-insecure-content")
             options.add_argument("--disable-features=VizDisplayCompositor")
             options.add_argument("--disable-extensions-file-access-check")
             options.add_argument("--disable-extensions-http-throttling")
-            
-            # Additional stability options
             options.add_argument("--disable-background-timer-throttling")
             options.add_argument("--disable-renderer-backgrounding")
             options.add_argument("--disable-backgrounding-occluded-windows")
+            options.add_argument("--disable-software-rasterizer")
+            options.add_argument("--disable-blink-features=AutomationControlled")
             
-            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            # Improve session stability  
+            options.add_argument("--disable-hang-monitor")
+            options.add_argument("--disable-prompt-on-repost")
+            options.add_argument("--disable-background-networking")
+            options.add_argument("--disable-sync")
+            options.add_argument("--metrics-recording-only")
+            options.add_argument("--disable-default-apps")
+            
+            # Use a unique debug port to avoid conflicts
+            if retry > 0:
+                import random
+                debug_port = random.randint(9222 + retry * 100, 9999)
+                options.add_argument(f"--remote-debugging-port={debug_port}")
+                log_text_message(f"🔄 Retry {retry}: Menggunakan debug port {debug_port}")
+            else:
+                options.add_argument("--remote-debugging-port=0")  # Use random port
+            
+            # Additional options to handle common Chrome issues
+            options.add_argument("--disable-logging")
+            options.add_argument("--disable-gpu-logging") 
+            options.add_argument("--disable-gpu-sandbox")
+            options.add_argument("--disable-software-rasterizer")
+            options.add_argument("--no-first-run")
+            options.add_argument("--no-default-browser-check")
+            options.add_argument("--disable-default-apps")
+            options.add_argument("--disable-popup-blocking")
+            options.add_argument("--disable-translate")
+            options.add_argument("--disable-background-timer-throttling")
+            options.add_argument("--disable-renderer-backgrounding")
+            options.add_argument("--disable-backgrounding-occluded-windows")
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            
+            # Handle the specific GPU and DevTools issues from the logs
+            options.add_argument("--disable-gl-drawing-for-tests")
+            options.add_argument("--disable-ipc-flooding-protection")
+            options.add_experimental_option("excludeSwitches", ["enable-automation", "enable-logging"])
             options.add_experimental_option('useAutomationExtension', False)
+            
+            # Set user agent to avoid detection
+            options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             
             # Load Buster extension
             if os.path.exists(BUSTER_EXTENSION_PATH):
@@ -1342,24 +1449,59 @@ def create_chrome_driver(use_existing_profile=True, max_retries=3):
             if os.path.exists(extension_path):
                 options.add_argument(f"--load-extension={extension_path}")
             
-            # Create driver with timeout
+            # Create driver with timeout and better error handling
             log_text_message(f"🚀 Memulai Chrome driver (percobaan {retry + 1}/{max_retries})...")
-            driver = webdriver.Chrome(
-                service=Service(ChromeDriverManager().install()),
-                options=options
-            )
             
-            log_text_message("✅ Chrome driver berhasil dibuat")
-            return driver, user_data_dir
+            try:
+                # Kill any existing Chrome processes that might interfere
+                if retry > 0:
+                    cleanup_chrome_processes()
+                
+                service = Service(ChromeDriverManager().install())
+                service.start()  # Start service first
+                
+                driver = webdriver.Chrome(
+                    service=service,
+                    options=options
+                )
+                
+                # Test the driver with a simple operation
+                driver.get("about:blank")
+                log_text_message("✅ Chrome driver berhasil dibuat dan ditest")
+                return driver, user_data_dir
+                
+            except Exception as inner_e:
+                log_text_message(f"❌ Error detail: {str(inner_e)}")
+                raise inner_e
             
         except Exception as e:
             log_text_message(f"❌ Error membuat Chrome driver (percobaan {retry + 1}): {e}")
             
-            if "DevToolsActivePort" in str(e) or "session not created" in str(e):
+            # Clean up any partial driver instances
+            try:
+                if 'driver' in locals():
+                    driver.quit()
+            except:
+                pass
+            
+            error_msg = str(e).lower()
+            if any(keyword in error_msg for keyword in ["devtoolsactiveport", "session not created", "chrome not reachable"]):
                 if retry < max_retries - 1:
-                    log_text_message("🔄 DevToolsActivePort error detected, mencoba dengan profil baru...")
+                    log_text_message("🔄 Masalah koneksi Chrome detected, mencoba dengan profil baru...")
                     use_existing_profile = False  # Force new profile on retry
-                    time.sleep(2)
+                    
+                    # Clean up problematic profile
+                    try:
+                        if 'user_data_dir' in locals() and os.path.exists(user_data_dir):
+                            shutil.rmtree(user_data_dir, ignore_errors=True)
+                            log_text_message(f"🧹 Cleaned up problematic profile: {user_data_dir}")
+                    except:
+                        pass
+                    
+                    # Wait longer before retry
+                    wait_time = (retry + 1) * 3
+                    log_text_message(f"⏱️ Waiting {wait_time} seconds before retry...")
+                    time.sleep(wait_time)
                     continue
             
             if retry == max_retries - 1:
@@ -1376,7 +1518,7 @@ def start_lab():
         log_text_message("🔁 Memulai proses lab...")
         
         # Try to create driver using existing profile first
-        driver, user_data_dir = create_chrome_driver(use_existing_profile=True)
+        driver, user_data_dir = create_chrome_driver(use_existing_profile=True, max_retries=5)  # Increase retries
         
         # PENTING: Hapus semua masks Firefox Relay yang ada
         log_text_message("🧹 Membersihkan masks Firefox Relay yang ada...")
@@ -1417,16 +1559,108 @@ def start_lab():
         except:
             pass
                 
-        # Generate new email
-        generate_btn = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Generate new mask')]"))
-        )
-        generate_btn.click()
-        time.sleep(3)
+        # Generate new email with improved reliability
+        generate_button_selectors = [
+            "//button[contains(text(), 'Generate new mask')]",
+            "//button[contains(text(), 'Generate')]", 
+            "//button[contains(@data-testid, 'generate')]",
+            "//button[contains(@class, 'generate')]",
+            "//*[contains(text(), 'Generate') and (name()='button' or name()='a')]"
+        ]
         
-        new_email_element = driver.find_element(By.CSS_SELECTOR, "button.MaskCard_copy-button__a7PXh samp")
-        new_email = new_email_element.text
-        log_text_message(f"📧 Email baru: {new_email}")
+        generate_btn = None
+        for selector in generate_button_selectors:
+            try:
+                generate_btn = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.XPATH, selector))
+                )
+                log_text_message(f"✅ Generate button found with selector: {selector}")
+                break
+            except TimeoutException:
+                continue
+        
+        if not generate_btn:
+            raise Exception("Generate button not found with any selector")
+            
+        generate_btn.click()
+        time.sleep(5)  # Wait longer for email generation
+        
+        # Try multiple selectors for email extraction
+        new_email = None
+        selectors_to_try = [
+            "button.MaskCard_copy-button__a7PXh samp",
+            "button[data-testid='copy-button'] samp",
+            "button[class*='copy-button'] samp", 
+            "samp[class*='mask']",
+            "button[class*='MaskCard'] samp",
+            ".mask-card samp",
+            "[data-testid='mask-email']",
+            "samp"
+        ]
+        
+        for selector in selectors_to_try:
+            try:
+                new_email_element = driver.find_element(By.CSS_SELECTOR, selector)
+                new_email = new_email_element.text
+                if new_email and "@" in new_email:
+                    log_text_message(f"📧 Email baru ditemukan dengan selector '{selector}': {new_email}")
+                    break
+            except Exception as e:
+                continue
+        
+        if not new_email:
+            # Fallback: get any text that looks like an email
+            try:
+                page_text = driver.page_source
+                import re
+                email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+                emails = re.findall(email_pattern, page_text)
+                if emails:
+                    # Filter for mozmail.com emails
+                    mozmail_emails = [email for email in emails if 'mozmail.com' in email]
+                    if mozmail_emails:
+                        new_email = mozmail_emails[0]
+                        log_text_message(f"📧 Email ditemukan via regex: {new_email}")
+            except Exception as e:
+                log_text_message(f"Error extracting email via regex: {e}")
+        
+        if not new_email:
+            # Fallback: get any text that looks like an email 
+            try:
+                page_text = driver.page_source
+                import re
+                email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+                emails = re.findall(email_pattern, page_text)
+                if emails:
+                    # Filter for mozmail.com emails (Firefox Relay)
+                    mozmail_emails = [email for email in emails if 'mozmail.com' in email.lower()]
+                    if mozmail_emails:
+                        # Get the most recent one (usually the last in the list)
+                        new_email = mozmail_emails[-1]
+                        log_text_message(f"📧 Email ditemukan via regex: {new_email}")
+                    elif emails:
+                        # Fallback to any email found
+                        new_email = emails[-1]
+                        log_text_message(f"📧 Email fallback ditemukan: {new_email}")
+            except Exception as e:
+                log_text_message(f"Error extracting email via regex: {e}")
+        
+        # Final fallback: manually check common mask locations
+        if not new_email:
+            try:
+                # Look for any element containing an @ symbol
+                at_elements = driver.find_elements(By.XPATH, "//*[contains(text(), '@')]")
+                for element in at_elements:
+                    text = element.text.strip()
+                    if '@' in text and '.' in text and len(text) < 100:  # Basic email validation
+                        new_email = text
+                        log_text_message(f"📧 Email ditemukan via @ search: {new_email}")
+                        break
+            except Exception as e:
+                log_text_message(f"Error in @ symbol search: {e}")
+        
+        if not new_email:
+            raise Exception("Gagal mengekstrak email baru dari Firefox Relay - semua metode gagal")
         
         # Open signup page
         if not open_signup_page():
@@ -1766,6 +2000,10 @@ def setup_gui():
     """Setup the GUI interface"""
     global gui_root, log_text, model_dropdown, polling_delay_entry
     
+    if not GUI_AVAILABLE:
+        log_text_message("GUI not available in this environment, running in headless mode")
+        return
+    
     customtkinter.set_appearance_mode("dark")
     customtkinter.set_default_color_theme("blue")
     
@@ -1872,6 +2110,91 @@ def setup_gui():
     gui_root.mainloop()
 
 
+def run_lab_cli():
+    """Run lab process via command line interface"""
+    print("🚀 Starting Cloud Skills Boost Lab Automation (CLI Mode)")
+    print("=" * 60)
+    
+    # Test core functions first
+    if not test_functions():
+        print("❌ Core function tests failed, exiting")
+        return
+    
+    print("\n📋 This script automates:")
+    print("1. Firefox Relay email generation")
+    print("2. Cloud Skills Boost account creation") 
+    print("3. Lab startup and API key extraction")
+    
+    print("\n⚠️  Prerequisites:")
+    print("- Chrome browser installed")
+    print("- Firefox Relay account logged in")
+    print("- Stable internet connection")
+    
+    response = input("\n▶️  Continue? (y/N): ").strip().lower()
+    if response != 'y':
+        print("Exiting...")
+        return
+    
+    try:
+        # You could call start_lab() here for full automation
+        print("\n🔧 Lab automation would start here...")
+        print("💡 Use GUI mode for full functionality")
+        
+    except KeyboardInterrupt:
+        print("\n⚠️ Process interrupted by user")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+
+
+def test_functions():
+    """Test critical functions without browser dependencies"""
+    print("🧪 Testing core functions...")
+    
+    # Test random_string function
+    try:
+        test_string = random_string()
+        assert len(test_string) == 8
+        test_string_10 = random_string(10)
+        assert len(test_string_10) == 10
+        print(f"✅ random_string test passed: '{test_string}', '{test_string_10}'")
+    except Exception as e:
+        print(f"❌ random_string test failed: {e}")
+        return False
+    
+    # Test RelayManager initialization
+    try:
+        relay_manager = RelayManager()
+        assert relay_manager.api_token is not None
+        print("✅ RelayManager initialization test passed")
+    except Exception as e:
+        print(f"❌ RelayManager test failed: {e}")
+        return False
+    
+    # Test log_text_message function
+    try:
+        log_text_message("Test message")
+        print("✅ log_text_message test passed")
+    except Exception as e:
+        print(f"❌ log_text_message test failed: {e}")
+        return False
+        
+    print("✅ All core function tests passed!")
+    return True
+
+
 # Main execution
 if __name__ == "__main__":
-    setup_gui()
+    # Test core functions first
+    if "--test" in sys.argv:
+        test_functions()
+    elif "--cli" in sys.argv:
+        run_lab_cli()
+    elif GUI_AVAILABLE:
+        setup_gui()
+    else:
+        log_text_message("Running in headless mode - GUI not available")
+        print("Available options:")
+        print("  --test  : Run core function tests")
+        print("  --cli   : Run CLI interface")
+        print("  --help  : Show this help")
+        # Could add CLI interface here if needed
