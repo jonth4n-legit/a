@@ -1197,86 +1197,205 @@ def handle_google_login(driver_incognito, username, password):
         return False
 
 
+def check_firefox_relay_login(driver, max_retries=3):
+    """Check if Firefox Relay is logged in with multiple verification methods"""
+    for retry in range(max_retries):
+        try:
+            log_text_message(f"🔍 Memeriksa login Firefox Relay (percobaan {retry + 1}/{max_retries})...")
+            
+            # Navigate to Firefox Relay
+            driver.get("https://relay.firefox.com/accounts/profile/")
+            time.sleep(5)
+            
+            # Method 1: Look for Generate new mask button
+            try:
+                WebDriverWait(driver, 8).until(
+                    EC.presence_of_element_located((By.XPATH, "//button[contains(text(), 'Generate new mask')]"))
+                )
+                log_text_message("✅ Firefox Relay terdeteksi sudah login (Generate button found)")
+                return True
+            except TimeoutException:
+                pass
+            
+            # Method 2: Check for profile elements or dashboard
+            try:
+                profile_elements = [
+                    "//div[contains(@class, 'profile')]",
+                    "//div[contains(@class, 'dashboard')]", 
+                    "//button[contains(@class, 'generate')]",
+                    "//div[contains(@class, 'alias')]"
+                ]
+                
+                for element_xpath in profile_elements:
+                    try:
+                        WebDriverWait(driver, 3).until(
+                            EC.presence_of_element_located((By.XPATH, element_xpath))
+                        )
+                        log_text_message("✅ Firefox Relay terdeteksi sudah login (profile element found)")
+                        return True
+                    except TimeoutException:
+                        continue
+            except Exception:
+                pass
+            
+            # Method 3: Check current URL for redirect patterns
+            current_url = driver.current_url.lower()
+            if "profile" in current_url or "dashboard" in current_url:
+                log_text_message("✅ Firefox Relay terdeteksi sudah login (URL indicates logged in)")
+                return True
+            
+            # Method 4: Check if we're redirected to login page
+            if "accounts.firefox.com" in current_url or "login" in current_url:
+                log_text_message("❌ Firefox Relay belum login (redirected to login page)")
+                return False
+            
+            # If none of the above worked, try refreshing and retrying
+            if retry < max_retries - 1:
+                log_text_message("🔄 Status tidak jelas, refresh dan coba lagi...")
+                driver.refresh()
+                time.sleep(3)
+                continue
+            
+            log_text_message("⚠️ Status login Firefox Relay tidak dapat dipastikan")
+            return False
+            
+        except Exception as e:
+            log_text_message(f"❌ Error checking Firefox Relay login (percobaan {retry + 1}): {e}")
+            if retry < max_retries - 1:
+                time.sleep(2)
+                continue
+            return False
+    
+    return False
+
+
+def create_chrome_driver(use_existing_profile=True, max_retries=3):
+    """Create Chrome driver with proper error handling and session reuse"""
+    for retry in range(max_retries):
+        try:
+            options = Options()
+            
+            # Use existing profile by default, fallback to unique if needed
+            if use_existing_profile and os.path.exists(USER_DATA_DIR):
+                user_data_dir = USER_DATA_DIR
+                log_text_message(f"🔄 Menggunakan profil yang sudah ada: {user_data_dir}")
+            else:
+                # Fallback to unique profile only if existing profile fails or doesn't exist
+                def random_string(length=8):
+                    return ''.join(random.choices(string.ascii_lowercase, k=length))
+                unique_suffix = random_string(6)
+                user_data_dir = f"{USER_DATA_DIR}_{unique_suffix}"
+                log_text_message(f"🆕 Membuat profil baru: {user_data_dir}")
+            
+            # Clean up any conflicts with the selected directory
+            try:
+                if not use_existing_profile and os.path.exists(user_data_dir):
+                    shutil.rmtree(user_data_dir, ignore_errors=True)
+                    time.sleep(1)
+            except:
+                pass
+            
+            options.add_argument(f"--user-data-dir={user_data_dir}")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--ignore-certificate-errors")
+            options.add_argument("--start-maximized")
+            
+            # Try to avoid port conflicts
+            if retry > 0:
+                # Use different port strategy on retry
+                import random
+                debug_port = random.randint(9222, 9999)
+                options.add_argument(f"--remote-debugging-port={debug_port}")
+                log_text_message(f"🔄 Retry {retry}: Menggunakan debug port {debug_port}")
+            else:
+                options.add_argument("--remote-debugging-port=0")  # Use random port
+            
+            options.add_argument("--disable-software-rasterizer")
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_argument("--disable-web-security")
+            options.add_argument("--allow-running-insecure-content")
+            options.add_argument("--disable-features=VizDisplayCompositor")
+            options.add_argument("--disable-extensions-file-access-check")
+            options.add_argument("--disable-extensions-http-throttling")
+            
+            # Additional stability options
+            options.add_argument("--disable-background-timer-throttling")
+            options.add_argument("--disable-renderer-backgrounding")
+            options.add_argument("--disable-backgrounding-occluded-windows")
+            
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            options.add_experimental_option('useAutomationExtension', False)
+            
+            # Load Buster extension
+            if os.path.exists(BUSTER_EXTENSION_PATH):
+                options.add_argument(f"--load-extension={BUSTER_EXTENSION_PATH}")
+                log_text_message("✅ Buster Captcha Solver extension loaded")
+            else:
+                log_text_message("⚠️ Buster extension not found, captcha will need manual solving")
+            
+            # Load other extensions if exists
+            extension_path = os.path.join(os.getcwd(), "0.4.2_0")
+            if os.path.exists(extension_path):
+                options.add_argument(f"--load-extension={extension_path}")
+            
+            # Create driver with timeout
+            log_text_message(f"🚀 Memulai Chrome driver (percobaan {retry + 1}/{max_retries})...")
+            driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()),
+                options=options
+            )
+            
+            log_text_message("✅ Chrome driver berhasil dibuat")
+            return driver, user_data_dir
+            
+        except Exception as e:
+            log_text_message(f"❌ Error membuat Chrome driver (percobaan {retry + 1}): {e}")
+            
+            if "DevToolsActivePort" in str(e) or "session not created" in str(e):
+                if retry < max_retries - 1:
+                    log_text_message("🔄 DevToolsActivePort error detected, mencoba dengan profil baru...")
+                    use_existing_profile = False  # Force new profile on retry
+                    time.sleep(2)
+                    continue
+            
+            if retry == max_retries - 1:
+                raise Exception(f"Gagal membuat Chrome driver setelah {max_retries} percobaan: {e}")
+    
+    return None, None
+
+
 def start_lab():
     """Main function to start lab and process"""
     global driver, restart_now
     
-    def random_string(length=8):
-        return ''.join(random.choices(string.ascii_lowercase, k=length))
-    
-    # Create unique user data directory to avoid conflicts
-    unique_suffix = random_string(6)
-    unique_user_data_dir = f"{USER_DATA_DIR}_{unique_suffix}"
-    
     try:
         log_text_message("🔁 Memulai proses lab...")
         
-        # Clean up any existing user data directory conflicts
-        try:
-            if os.path.exists(unique_user_data_dir):
-                shutil.rmtree(unique_user_data_dir, ignore_errors=True)
-                time.sleep(1)
-        except:
-            pass
-        
-        # Initialize driver with extensions and unique profile
-        options = Options()
-        options.add_argument(f"--user-data-dir={unique_user_data_dir}")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--ignore-certificate-errors")
-        options.add_argument("--start-maximized")
-        options.add_argument("--remote-debugging-port=0")  # Use random port
-        options.add_argument("--disable-software-rasterizer")
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_argument("--disable-web-security")
-        options.add_argument("--allow-running-insecure-content")
-        options.add_argument("--disable-features=VizDisplayCompositor")
-        options.add_argument("--disable-extensions-file-access-check")
-        options.add_argument("--disable-extensions-http-throttling")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option('useAutomationExtension', False)
-        
-        # Load Buster extension
-        if os.path.exists(BUSTER_EXTENSION_PATH):
-            options.add_argument(f"--load-extension={BUSTER_EXTENSION_PATH}")
-            log_text_message("✅ Buster Captcha Solver extension loaded")
-        else:
-            log_text_message("⚠️ Buster extension not found, captcha will need manual solving")
-        
-        # Load other extensions if exists
-        extension_path = os.path.join(os.getcwd(), "0.4.2_0")
-        if os.path.exists(extension_path):
-            options.add_argument(f"--load-extension={extension_path}")
-        
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()),
-            options=options
-        )
+        # Try to create driver using existing profile first
+        driver, user_data_dir = create_chrome_driver(use_existing_profile=True)
         
         # PENTING: Hapus semua masks Firefox Relay yang ada
         log_text_message("🧹 Membersihkan masks Firefox Relay yang ada...")
         relay_manager = RelayManager()
         relay_manager.delete_all_masks()
         
-        # Generate new email using Firefox Relay via browser
-        driver.get("https://relay.firefox.com/accounts/profile/")
-        time.sleep(5)
+        # Check Firefox Relay login status
+        log_text_message("🔍 Memeriksa status login Firefox Relay...")
+        firefox_relay_logged_in = check_firefox_relay_login(driver)
         
-        # Check if already logged in to Firefox Relay
-        try:
-            # Look for the generate new mask button to confirm we're logged in
-            WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.XPATH, "//button[contains(text(), 'Generate new mask')]"))
-            )
-            log_text_message("Firefox Relay sudah login, melanjutkan...")
-        except TimeoutException:
+        if not firefox_relay_logged_in:
             log_text_message("Firefox Relay belum login, silakan login manual terlebih dahulu.")
             log_text_message("Buka browser dan login ke Firefox Relay, lalu tekan Enter untuk melanjutkan...")
             input("Tekan Enter setelah login ke Firefox Relay...")
-            driver.refresh()
-            time.sleep(3)
+            
+            # Verify login after manual intervention
+            firefox_relay_logged_in = check_firefox_relay_login(driver)
+            if not firefox_relay_logged_in:
+                raise Exception("Firefox Relay login tidak berhasil, proses dihentikan.")
+        
+        log_text_message("✅ Firefox Relay sudah login, melanjutkan...")
         
         # Hapus masks yang mungkin muncul setelah page load (double check)
         try:
@@ -1543,12 +1662,12 @@ def start_lab():
         except:
             pass
         
-        # Clean up unique user data directory
+        # Clean up user data directory if it was a temporary one
         try:
-            if 'unique_user_data_dir' in locals() and os.path.exists(unique_user_data_dir):
+            if 'user_data_dir' in locals() and user_data_dir != USER_DATA_DIR and os.path.exists(user_data_dir):
                 time.sleep(2)  # Wait a bit before cleanup
-                shutil.rmtree(unique_user_data_dir, ignore_errors=True)
-                log_text_message(f"🧹 Cleaned up temporary profile: {unique_user_data_dir}")
+                shutil.rmtree(user_data_dir, ignore_errors=True)
+                log_text_message(f"🧹 Cleaned up temporary profile: {user_data_dir}")
         except Exception as e:
             log_text_message(f"⚠️ Could not clean up temp profile: {e}")
 
