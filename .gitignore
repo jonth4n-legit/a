@@ -1,0 +1,38 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# API output
+api.txt
+
+# Browser profiles and temp data
+selenium-profile*/
+*_selenium-profile*/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Cookies and session data
+cookies.json
+
+# Chrome crash reports
+chrome_debug.log
