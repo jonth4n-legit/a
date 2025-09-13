@@ -1271,6 +1271,8 @@ def check_firefox_relay_login(driver, max_retries=3):
 
 def create_chrome_driver(use_existing_profile=True, max_retries=3):
     """Create Chrome driver with proper error handling and session reuse"""
+    import random  # Import random module for fallback profiles
+    
     for retry in range(max_retries):
         try:
             options = Options()
