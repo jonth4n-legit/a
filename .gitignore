@@ -36,3 +36,12 @@ cookies.json
 
 # Chrome crash reports
 chrome_debug.log
+
+# Chrome user profiles (from automation)
+chrome_profile_*/
+
+# Automation logs
+automation.log
+
+# Compiled Python files
+*.pyc
